@@ -467,7 +467,7 @@ def create_excel_report(df_clean, customer_segments, segment_metrics, repurchase
         output.seek(0)
         return output
 
-def calculate_ltv(df):
+def calculate_ltv(df, include_one_time=True):
     """Calculate customer lifetime value metrics."""
     # Calculate basic customer metrics
     customer_metrics = df.groupby('Customer').agg({
@@ -476,6 +476,26 @@ def calculate_ltv(df):
     }).reset_index()
     
     customer_metrics.columns = ['Customer', 'visit_count', 'avg_transaction', 'total_spend', 'first_visit', 'last_visit']
+    
+    # Filter out one-time buyers if specified
+    if not include_one_time:
+        customer_metrics = customer_metrics[customer_metrics['visit_count'] > 1]
+    
+    if len(customer_metrics) == 0:
+        return pd.DataFrame(), {
+            'avg_customer_lifetime_days': 0,
+            'avg_lifetime_visits': 0,
+            'avg_lifetime_value': 0,
+            'median_lifetime_value': 0,
+            'avg_transaction_value': 0,
+            'total_customer_value': 0,
+            'avg_annual_value': 0,
+            'projected_annual_value': 0,
+            'one_time_customer_ratio': 0,
+            'returning_customer_ratio': 0,
+            'top_10_percent_value': 0,
+            'bottom_10_percent_value': 0
+        }
     
     # Calculate time-based metrics
     customer_metrics['customer_lifetime_days'] = (customer_metrics['last_visit'] - customer_metrics['first_visit']).dt.days
@@ -519,7 +539,7 @@ def calculate_ltv(df):
     
     # For one-time customers and short-term customers, set annual values to their total spend
     other_customers = pd.concat([
-        one_time_customers,
+        one_time_customers if include_one_time else pd.DataFrame(),
         returning_customers[~returning_customers.index.isin(long_term_customers.index)] if not returning_customers.empty else pd.DataFrame()
     ])
     
@@ -542,7 +562,7 @@ def calculate_ltv(df):
         'total_customer_value': customer_metrics['total_spend'].sum(),
         'avg_annual_value': customer_metrics['historical_annual_value'].mean(),
         'projected_annual_value': long_term_customers['projected_annual_value'].mean() if not long_term_customers.empty else customer_metrics['total_spend'].mean(),
-        'one_time_customer_ratio': len(one_time_customers) / len(customer_metrics) * 100,
+        'one_time_customer_ratio': len(one_time_customers) / len(customer_metrics) * 100 if include_one_time else 0,
         'returning_customer_ratio': len(returning_customers) / len(customer_metrics) * 100 if not returning_customers.empty else 0,
         'top_10_percent_value': customer_metrics.nlargest(int(len(customer_metrics) * 0.1), 'total_spend')['total_spend'].mean(),
         'bottom_10_percent_value': customer_metrics.nsmallest(int(len(customer_metrics) * 0.1), 'total_spend')['total_spend'].mean()
@@ -673,13 +693,14 @@ def main():
         retention_data = calculate_revenue_retention(df_clean)
         
         # Create tabs for different analyses
-        tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
+        tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
             "📈 Overview",
             "🔄 Customer Retention",
             "👥 Customer Segments",
             "💰 Revenue Analysis",
             "👤 Client Analysis",
             "💎 Lifetime Value",
+            "🔍 One-Time Buyers",
             "📊 Summary & Export"
         ])
         
@@ -1320,8 +1341,22 @@ def main():
             This analysis helps identify your most valuable customers and opportunities for growth.
             """)
             
-            # Calculate LTV metrics
-            customer_ltv, ltv_summary = calculate_ltv(df_clean)
+            # Add toggle for one-time buyers
+            include_one_time = st.toggle(
+                "Include One-Time Buyers",
+                value=True,
+                help="Toggle to include or exclude one-time buyers in the LTV analysis"
+            )
+            
+            # Calculate LTV metrics with toggle consideration
+            customer_ltv, ltv_summary = calculate_ltv(df_clean, include_one_time)
+            
+            # Add analysis mode indicator
+            st.markdown(f"""
+            <div style='padding: 10px; background-color: #f0f2f6; border-radius: 5px; margin-bottom: 20px;'>
+                📊 Analysis Mode: {'All Customers' if include_one_time else 'Returning Customers Only'}
+            </div>
+            """, unsafe_allow_html=True)
             
             # Display key LTV metrics with explanations
             st.subheader("🔑 Key Metrics")
@@ -1499,6 +1534,193 @@ def main():
                 """, unsafe_allow_html=True)
         
         with tab7:
+            st.header("One-Time Buyers Analysis")
+            st.markdown("""
+            This section focuses on customers who have made only one purchase. Understanding these customers 
+            can help identify opportunities to convert them into returning customers.
+            """)
+            
+            # Get one-time buyers data
+            one_time_buyers = df_clean.groupby('Customer').agg({
+                'Total': ['count', 'sum', 'mean'],
+                'Date': ['min', 'max']
+            }).reset_index()
+            one_time_buyers.columns = ['Customer', 'Visit Count', 'Total Spend', 'Average Spend', 'First Visit', 'Last Visit']
+            one_time_buyers = one_time_buyers[one_time_buyers['Visit Count'] == 1].copy()
+            
+            # Calculate days since purchase
+            one_time_buyers['Days Since Purchase'] = (df_clean['Date'].max() - one_time_buyers['First Visit']).dt.days
+            
+            # Calculate key metrics
+            total_one_time = len(one_time_buyers)
+            total_customers = df_clean['Customer'].nunique()
+            one_time_revenue = one_time_buyers['Total Spend'].sum()
+            total_revenue = df_clean.groupby('Customer')['Total'].sum().sum()
+            
+            # Display key metrics
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric(
+                    "One-Time Buyers",
+                    f"{total_one_time:,}",
+                    f"{(total_one_time/total_customers*100):.1f}% of customers"
+                )
+            with col2:
+                st.metric(
+                    "Average Purchase",
+                    f"${one_time_buyers['Total Spend'].mean():.2f}",
+                    f"vs ${df_clean.groupby('Customer')['Total'].mean().mean():.2f} overall"
+                )
+            with col3:
+                st.metric(
+                    "Revenue Share",
+                    f"${one_time_revenue:,.2f}",
+                    f"{(one_time_revenue/total_revenue*100):.1f}% of total"
+                )
+            with col4:
+                st.metric(
+                    "Avg Days Since Purchase",
+                    f"{one_time_buyers['Days Since Purchase'].mean():.0f}",
+                    f"Range: {one_time_buyers['Days Since Purchase'].min():.0f}-{one_time_buyers['Days Since Purchase'].max():.0f}"
+                )
+            
+            # Time-based segmentation
+            st.subheader("📅 Purchase Recency")
+            recency_segments = pd.cut(
+                one_time_buyers['Days Since Purchase'],
+                bins=[0, 30, 90, 180, float('inf')],
+                labels=['Last 30 Days', '31-90 Days', '91-180 Days', 'Over 180 Days']
+            )
+            recency_analysis = pd.DataFrame({
+                'Count': recency_segments.value_counts(),
+                'Revenue': one_time_buyers.groupby(recency_segments)['Total Spend'].sum(),
+                'Avg Spend': one_time_buyers.groupby(recency_segments)['Total Spend'].mean()
+            }).round(2)
+            
+            # Display recency analysis
+            st.dataframe(recency_analysis, use_container_width=True)
+            
+            # Spending patterns
+            st.subheader("💰 Spending Patterns")
+            
+            # Create spending segments
+            spending_segments = pd.qcut(
+                one_time_buyers['Total Spend'],
+                q=4,
+                labels=['Low', 'Medium', 'High', 'Premium']
+            )
+            
+            spending_analysis = pd.DataFrame({
+                'Count': spending_segments.value_counts(),
+                'Total Revenue': one_time_buyers.groupby(spending_segments)['Total Spend'].sum(),
+                'Average Spend': one_time_buyers.groupby(spending_segments)['Total Spend'].mean(),
+            }).round(2)
+            
+            # Display spending analysis
+            st.dataframe(spending_analysis, use_container_width=True)
+            
+            # Customer List with Filters
+            st.subheader("👥 Customer List")
+            
+            # Add filters
+            col1, col2 = st.columns(2)
+            with col1:
+                days_filter = st.selectbox(
+                    "Purchase Recency",
+                    ['All', 'Last 30 Days', '31-90 Days', '91-180 Days', 'Over 180 Days']
+                )
+            with col2:
+                spend_filter = st.selectbox(
+                    "Spending Level",
+                    ['All', 'Low', 'Medium', 'High', 'Premium']
+                )
+            
+            # Filter the data
+            filtered_customers = one_time_buyers.copy()
+            if days_filter != 'All':
+                if days_filter == 'Last 30 Days':
+                    filtered_customers = filtered_customers[filtered_customers['Days Since Purchase'] <= 30]
+                elif days_filter == '31-90 Days':
+                    filtered_customers = filtered_customers[
+                        (filtered_customers['Days Since Purchase'] > 30) & 
+                        (filtered_customers['Days Since Purchase'] <= 90)
+                    ]
+                elif days_filter == '91-180 Days':
+                    filtered_customers = filtered_customers[
+                        (filtered_customers['Days Since Purchase'] > 90) & 
+                        (filtered_customers['Days Since Purchase'] <= 180)
+                    ]
+                else:
+                    filtered_customers = filtered_customers[filtered_customers['Days Since Purchase'] > 180]
+            
+            if spend_filter != 'All':
+                quartiles = pd.qcut(one_time_buyers['Total Spend'], q=4, labels=['Low', 'Medium', 'High', 'Premium'])
+                filtered_customers = filtered_customers[quartiles == spend_filter]
+            
+            # Display filtered customer list
+            st.dataframe(
+                filtered_customers.sort_values('Days Since Purchase')[
+                    ['Customer', 'Total Spend', 'First Visit', 'Days Since Purchase']
+                ].reset_index(drop=True),
+                use_container_width=True
+            )
+            
+            # Insights and Recommendations
+            col1, col2 = st.columns(2)
+            with col1:
+                st.markdown("""
+                <div class='insight-box'>
+                    <h4>📊 Key Insights</h4>
+                    <ul>
+                        <li><strong>Customer Base:</strong>
+                            <ul>
+                                <li>{:.1f}% of total customer base</li>
+                                <li>${:.2f} average transaction value</li>
+                                <li>{:.1f}% contribution to revenue</li>
+                            </ul>
+                        </li>
+                        <li><strong>Timing Patterns:</strong>
+                            <ul>
+                                <li>{} recent purchases (last 30 days)</li>
+                                <li>{:.0f} days average since purchase</li>
+                                <li>{} customers inactive >180 days</li>
+                            </ul>
+                        </li>
+                    </ul>
+                </div>
+                """.format(
+                    (total_one_time/total_customers*100),
+                    one_time_buyers['Total Spend'].mean(),
+                    (one_time_revenue/total_revenue*100),
+                    len(one_time_buyers[one_time_buyers['Days Since Purchase'] <= 30]),
+                    one_time_buyers['Days Since Purchase'].mean(),
+                    len(one_time_buyers[one_time_buyers['Days Since Purchase'] > 180])
+                ), unsafe_allow_html=True)
+            
+            with col2:
+                st.markdown("""
+                <div class='recommendation-box'>
+                    <h4>💡 Recommendations</h4>
+                    <ul>
+                        <li><strong>Immediate Actions:</strong>
+                            <ul>
+                                <li>Follow up with recent customers (≤30 days)</li>
+                                <li>Target high-spenders for personalized outreach</li>
+                                <li>Implement a "Welcome Back" program</li>
+                            </ul>
+                        </li>
+                        <li><strong>Strategic Initiatives:</strong>
+                            <ul>
+                                <li>Develop re-engagement campaign for 31-90 day segment</li>
+                                <li>Create special offers for premium one-time buyers</li>
+                                <li>Set up automated follow-up communications</li>
+                            </ul>
+                        </li>
+                    </ul>
+                </div>
+                """, unsafe_allow_html=True)
+        
+        with tab8:
             st.header("Summary & Export")
             st.markdown("Analysis Period: {} to {}".format(
                 start_date.strftime('%Y-%m-%d'),
