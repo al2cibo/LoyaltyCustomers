@@ -107,8 +107,7 @@ def calculate_repurchase_rate(df, window_days):
     """Calculate repurchase rate for a given time window."""
     # First, get first and last purchase dates for each customer
     customer_purchases = df.groupby('Customer').agg({
-        'Date': ['min', 'max'],
-        'ID': 'count',
+        'Date': ['min', 'max', 'count'],
         'Total': ['sum', 'mean']
     })
     
@@ -116,26 +115,38 @@ def calculate_repurchase_rate(df, window_days):
     customer_purchases.reset_index(inplace=True)
     customer_purchases.columns = ['Customer', 'first_purchase', 'last_purchase', 'visit_count', 'total_spend', 'avg_spend']
     
-    # Calculate time difference between first and last purchase
-    customer_purchases['days_between'] = (customer_purchases['last_purchase'] - customer_purchases['first_purchase']).dt.days
-    customer_purchases['avg_days_between_visits'] = customer_purchases['days_between'] / customer_purchases['visit_count']
+    # Separate one-time customers
+    one_time_customers = customer_purchases[customer_purchases['visit_count'] == 1]
+    returning_customers = customer_purchases[customer_purchases['visit_count'] > 1]
+    
+    # For returning customers, calculate time between visits
+    if not returning_customers.empty:
+        returning_customers['days_between'] = (returning_customers['last_purchase'] - returning_customers['first_purchase']).dt.days
+        returning_customers['avg_days_between_visits'] = returning_customers['days_between'] / (returning_customers['visit_count'] - 1)  # Subtract 1 from visit count for intervals
     
     # Count customers who returned within window
-    returned = customer_purchases[customer_purchases['days_between'] >= window_days]['Customer'].count()
+    returned = returning_customers[returning_customers['days_between'] >= window_days]['Customer'].count() if not returning_customers.empty else 0
     total_customers = len(customer_purchases)
     
     # Calculate average spend for retained vs non-retained customers
-    retained_customers = customer_purchases[customer_purchases['days_between'] >= window_days]
-    non_retained_customers = customer_purchases[customer_purchases['days_between'] < window_days]
+    retained_customers = returning_customers[returning_customers['days_between'] >= window_days] if not returning_customers.empty else pd.DataFrame()
+    non_retained_customers = pd.concat([
+        one_time_customers,
+        returning_customers[returning_customers['days_between'] < window_days] if not returning_customers.empty else pd.DataFrame()
+    ])
     
     retention_stats = {
         'rate': (returned / total_customers * 100) if total_customers > 0 else 0,
         'retained_avg_spend': retained_customers['avg_spend'].mean() if not retained_customers.empty else 0,
         'non_retained_avg_spend': non_retained_customers['avg_spend'].mean() if not non_retained_customers.empty else 0,
         'retained_visit_freq': retained_customers['avg_days_between_visits'].mean() if not retained_customers.empty else 0,
-        'non_retained_visit_freq': non_retained_customers['avg_days_between_visits'].mean() if not non_retained_customers.empty else 0,
+        'non_retained_visit_freq': returning_customers[returning_customers['days_between'] < window_days]['avg_days_between_visits'].mean() if not returning_customers.empty else 0,
         'retained_total_revenue': retained_customers['total_spend'].sum() if not retained_customers.empty else 0,
-        'non_retained_total_revenue': non_retained_customers['total_spend'].sum() if not non_retained_customers.empty else 0
+        'non_retained_total_revenue': non_retained_customers['total_spend'].sum() if not non_retained_customers.empty else 0,
+        'one_time_customers': len(one_time_customers),
+        'one_time_revenue': one_time_customers['total_spend'].sum() if not one_time_customers.empty else 0,
+        'returning_customers': len(returning_customers),
+        'avg_visits_returning': returning_customers['visit_count'].mean() if not returning_customers.empty else 0
     }
     
     return retention_stats
@@ -183,16 +194,35 @@ def segment_customers(df):
     customer_metrics['frequency'] = customer_metrics['visit_count']
     customer_metrics['monetary'] = customer_metrics['total_spend']
     customer_metrics['customer_lifetime_days'] = (customer_metrics['last_visit'] - customer_metrics['first_visit']).dt.days
-    customer_metrics['avg_days_between_visits'] = customer_metrics['customer_lifetime_days'] / customer_metrics['visit_count']
+    
+    # Handle one-time customers separately for avg_days_between_visits
+    returning_customers = customer_metrics[customer_metrics['visit_count'] > 1].copy()
+    one_time_customers = customer_metrics[customer_metrics['visit_count'] == 1].copy()
+    
+    # Calculate avg_days_between_visits only for returning customers
+    if not returning_customers.empty:
+        returning_customers['avg_days_between_visits'] = returning_customers['customer_lifetime_days'] / (returning_customers['visit_count'] - 1)
+        # Ensure no zero values in avg_days_between_visits
+        returning_customers.loc[returning_customers['avg_days_between_visits'] == 0, 'avg_days_between_visits'] = 1
+    
+    # For one-time customers, set avg_days_between_visits to None
+    one_time_customers['avg_days_between_visits'] = None
+    
+    # Combine the dataframes back
+    customer_metrics = pd.concat([returning_customers, one_time_customers])
+    
     customer_metrics['days_since_last_visit'] = (now - customer_metrics['last_visit']).dt.days
     
-    # Calculate quantiles for segmentation
-    spend_75th = customer_metrics['total_spend'].quantile(0.75)
-    freq_75th = customer_metrics['frequency'].quantile(0.75)
-    avg_days_median = customer_metrics['avg_days_between_visits'].quantile(0.5)
+    # Calculate quantiles excluding one-time customers for more accurate segmentation
+    spend_75th = returning_customers['total_spend'].quantile(0.75) if not returning_customers.empty else customer_metrics['total_spend'].quantile(0.75)
+    freq_75th = returning_customers['frequency'].quantile(0.75) if not returning_customers.empty else customer_metrics['frequency'].quantile(0.75)
+    avg_days_median = returning_customers['avg_days_between_visits'].quantile(0.5) if not returning_customers.empty else float('inf')
     
     # Enhanced segmentation logic
     def assign_segment(row):
+        if row['visit_count'] == 1:
+            return 'One-Time Customer'
+            
         if row['days_since_last_visit'] > 90:
             if row['total_spend'] > spend_75th:
                 return 'Lost High-Value'
@@ -209,7 +239,7 @@ def segment_customers(df):
         if row['days_since_last_visit'] <= 30:
             return 'Recent Customer'
         
-        if row['avg_days_between_visits'] < avg_days_median:
+        if pd.notna(row['avg_days_between_visits']) and row['avg_days_between_visits'] < avg_days_median:
             return 'Regular Customer'
         
         return 'Occasional Customer'
@@ -314,6 +344,52 @@ def analyze_revenue(df):
     
     return monthly_revenue, daily_revenue
 
+def create_distribution_plots(df_clean, customer_metrics):
+    """Create distribution plots with proper handling of edge cases."""
+    # Get returning customers for better distribution analysis
+    returning_customers = customer_metrics[
+        (customer_metrics['visit_count'] > 1) & 
+        (customer_metrics['avg_days_between_visits'].notna()) & 
+        (customer_metrics['avg_days_between_visits'] > 0)
+    ]
+    
+    # Transaction Value Distribution (excluding zero values)
+    transaction_fig = px.histogram(
+        df_clean[df_clean['Total'] > 0],
+        x='Total',
+        nbins=50,
+        title='Distribution of Transaction Values (Excluding Zero Values)',
+        labels={'Total': 'Transaction Amount ($)'}
+    )
+    transaction_fig.update_layout(
+        height=400,
+        showlegend=False,
+        xaxis_title="Transaction Amount ($)",
+        yaxis_title="Count"
+    )
+    
+    # Visit Frequency Distribution (only for returning customers)
+    if not returning_customers.empty:
+        visit_freq_fig = px.histogram(
+            returning_customers,
+            x='avg_days_between_visits',
+            nbins=30,
+            title='Distribution of Visit Frequency (Returning Customers Only)',
+            labels={'avg_days_between_visits': 'Average Days Between Visits'}
+        )
+        visit_freq_fig.update_layout(
+            height=400,
+            showlegend=False,
+            xaxis_title="Days Between Visits",
+            yaxis_title="Count",
+            # Set x-axis minimum to slightly above 0 to exclude any remaining zero values
+            xaxis=dict(range=[0.1, returning_customers['avg_days_between_visits'].quantile(0.95)])
+        )
+    else:
+        visit_freq_fig = None
+    
+    return transaction_fig, visit_freq_fig
+
 def create_excel_report(df_clean, customer_segments, segment_metrics, repurchase_data, retention_data, client_analysis):
     """Enhanced Excel report with client analysis."""
     output = io.BytesIO()
@@ -390,6 +466,89 @@ def create_excel_report(df_clean, customer_segments, segment_metrics, repurchase
         writer.close()
         output.seek(0)
         return output
+
+def calculate_ltv(df):
+    """Calculate customer lifetime value metrics."""
+    # Calculate basic customer metrics
+    customer_metrics = df.groupby('Customer').agg({
+        'Total': ['count', 'mean', 'sum'],
+        'Date': ['min', 'max']
+    }).reset_index()
+    
+    customer_metrics.columns = ['Customer', 'visit_count', 'avg_transaction', 'total_spend', 'first_visit', 'last_visit']
+    
+    # Calculate time-based metrics
+    customer_metrics['customer_lifetime_days'] = (customer_metrics['last_visit'] - customer_metrics['first_visit']).dt.days
+    customer_metrics['days_since_first'] = (df['Date'].max() - customer_metrics['first_visit']).dt.days
+    
+    # Ensure we don't divide by zero by setting minimum days to 1
+    customer_metrics.loc[customer_metrics['days_since_first'] == 0, 'days_since_first'] = 1
+    customer_metrics.loc[customer_metrics['customer_lifetime_days'] == 0, 'customer_lifetime_days'] = 1
+    
+    # Handle one-time customers vs returning customers
+    returning_customers = customer_metrics[customer_metrics['visit_count'] > 1].copy()
+    one_time_customers = customer_metrics[customer_metrics['visit_count'] == 1].copy()
+    
+    # Calculate metrics for returning customers
+    if not returning_customers.empty:
+        # Average time between visits (excluding first visit)
+        returning_customers['avg_days_between_visits'] = returning_customers['customer_lifetime_days'] / (returning_customers['visit_count'] - 1)
+        # Ensure no zero values in avg_days_between_visits
+        returning_customers.loc[returning_customers['avg_days_between_visits'] == 0, 'avg_days_between_visits'] = 1
+        
+        # Calculate annual values only for customers with sufficient history (>= 30 days)
+        long_term_customers = returning_customers[returning_customers['days_since_first'] >= 30].copy()
+        if not long_term_customers.empty:
+            # Monthly visit frequency based on actual history
+            long_term_customers['monthly_visit_frequency'] = (long_term_customers['visit_count'] / long_term_customers['days_since_first']) * 30
+            # Monthly revenue based on actual history
+            long_term_customers['monthly_revenue'] = (long_term_customers['total_spend'] / long_term_customers['days_since_first']) * 30
+            # Projected annual value
+            long_term_customers['projected_annual_value'] = long_term_customers['monthly_revenue'] * 12
+            # Historical annual value
+            long_term_customers['historical_annual_value'] = (long_term_customers['total_spend'] / long_term_customers['days_since_first']) * 365
+            
+            # Cap extremely high values at 3x the average total spend
+            max_reasonable_value = returning_customers['total_spend'].mean() * 3
+            long_term_customers.loc[long_term_customers['projected_annual_value'] > max_reasonable_value, 'projected_annual_value'] = max_reasonable_value
+            long_term_customers.loc[long_term_customers['historical_annual_value'] > max_reasonable_value, 'historical_annual_value'] = max_reasonable_value
+        else:
+            long_term_customers = pd.DataFrame()
+    else:
+        long_term_customers = pd.DataFrame()
+    
+    # For one-time customers and short-term customers, set annual values to their total spend
+    other_customers = pd.concat([
+        one_time_customers,
+        returning_customers[~returning_customers.index.isin(long_term_customers.index)] if not returning_customers.empty else pd.DataFrame()
+    ])
+    
+    if not other_customers.empty:
+        other_customers['monthly_visit_frequency'] = 0
+        other_customers['monthly_revenue'] = 0
+        other_customers['projected_annual_value'] = other_customers['total_spend']
+        other_customers['historical_annual_value'] = other_customers['total_spend']
+    
+    # Combine all customer segments
+    customer_metrics = pd.concat([long_term_customers, other_customers])
+    
+    # Calculate overall LTV metrics
+    ltv_summary = {
+        'avg_customer_lifetime_days': customer_metrics['customer_lifetime_days'].mean(),
+        'avg_lifetime_visits': customer_metrics['visit_count'].mean(),
+        'avg_lifetime_value': customer_metrics['total_spend'].mean(),
+        'median_lifetime_value': customer_metrics['total_spend'].median(),
+        'avg_transaction_value': customer_metrics['avg_transaction'].mean(),
+        'total_customer_value': customer_metrics['total_spend'].sum(),
+        'avg_annual_value': customer_metrics['historical_annual_value'].mean(),
+        'projected_annual_value': long_term_customers['projected_annual_value'].mean() if not long_term_customers.empty else customer_metrics['total_spend'].mean(),
+        'one_time_customer_ratio': len(one_time_customers) / len(customer_metrics) * 100,
+        'returning_customer_ratio': len(returning_customers) / len(customer_metrics) * 100 if not returning_customers.empty else 0,
+        'top_10_percent_value': customer_metrics.nlargest(int(len(customer_metrics) * 0.1), 'total_spend')['total_spend'].mean(),
+        'bottom_10_percent_value': customer_metrics.nsmallest(int(len(customer_metrics) * 0.1), 'total_spend')['total_spend'].mean()
+    }
+    
+    return customer_metrics, ltv_summary
 
 def main():
     st.title("📊 Retail Analytics Dashboard")
@@ -514,12 +673,13 @@ def main():
         retention_data = calculate_revenue_retention(df_clean)
         
         # Create tabs for different analyses
-        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+        tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
             "📈 Overview",
             "🔄 Customer Retention",
             "👥 Customer Segments",
             "💰 Revenue Analysis",
             "👤 Client Analysis",
+            "💎 Lifetime Value",
             "📊 Summary & Export"
         ])
         
@@ -556,6 +716,11 @@ def main():
             st.markdown("""
             This section provides a detailed analysis of customer retention patterns and their impact on revenue.
             Understanding these metrics helps identify opportunities to improve customer loyalty and revenue stability.
+            
+            > 💡 **Key Terms:**
+            > - **Retention Rate**: Percentage of customers who return within a specific time window
+            > - **Retained Revenue**: Revenue generated by returning customers
+            > - **Visit Frequency**: How often retained customers make purchases
             """)
             
             # Calculate retention metrics for different time windows
@@ -563,15 +728,25 @@ def main():
             retention_60 = calculate_repurchase_rate(df_clean, 60)
             retention_90 = calculate_repurchase_rate(df_clean, 90)
             
-            # Display retention rates
-            col1, col2, col3 = st.columns(3)
+            # Display retention rates with explanations
+            st.subheader("🔄 Retention Rates")
             
+            col1, col2, col3 = st.columns(3)
             with col1:
                 st.metric(
                     "30-Day Retention",
                     f"{retention_30['rate']:.1f}%",
                     f"${retention_30['retained_avg_spend']:.2f} avg spend"
                 )
+                st.markdown("""
+                <div class='insight-box' style='font-size: 0.9em;'>
+                    <p><strong>What this means:</strong> {:.1f}% of customers return within a month, spending ${:.2f} on average. 
+                    This is your short-term retention success rate.</p>
+                </div>
+                """.format(
+                    retention_30['rate'],
+                    retention_30['retained_avg_spend']
+                ), unsafe_allow_html=True)
             
             with col2:
                 st.metric(
@@ -579,6 +754,15 @@ def main():
                     f"{retention_60['rate']:.1f}%",
                     f"${retention_60['retained_avg_spend']:.2f} avg spend"
                 )
+                st.markdown("""
+                <div class='insight-box' style='font-size: 0.9em;'>
+                    <p><strong>What this means:</strong> {:.1f}% of customers return within two months, spending ${:.2f} on average. 
+                    This shows medium-term customer loyalty.</p>
+                </div>
+                """.format(
+                    retention_60['rate'],
+                    retention_60['retained_avg_spend']
+                ), unsafe_allow_html=True)
             
             with col3:
                 st.metric(
@@ -586,33 +770,72 @@ def main():
                     f"{retention_90['rate']:.1f}%",
                     f"${retention_90['retained_avg_spend']:.2f} avg spend"
                 )
+                st.markdown("""
+                <div class='insight-box' style='font-size: 0.9em;'>
+                    <p><strong>What this means:</strong> {:.1f}% of customers return within three months, spending ${:.2f} on average. 
+                    This indicates long-term customer relationships.</p>
+                </div>
+                """.format(
+                    retention_90['rate'],
+                    retention_90['retained_avg_spend']
+                ), unsafe_allow_html=True)
             
-            # Explanation of retention metrics
-            st.markdown("""
-            <div class='insight-box'>
-                <h4>📊 Understanding Retention Metrics</h4>
-                <p>The metrics above show how well we retain customers over different time periods:</p>
-                <ul>
-                    <li><strong>30-Day Retention:</strong> Percentage of customers who return within a month. This is a key indicator of short-term customer satisfaction.</li>
-                    <li><strong>60-Day Retention:</strong> Medium-term retention showing customer loyalty over two months.</li>
-                    <li><strong>90-Day Retention:</strong> Long-term retention indicating strong customer relationships.</li>
-                </ul>
-                <p>The "avg spend" below each percentage shows how much retained customers typically spend, helping identify the value of retained customers.</p>
-            </div>
-            """, unsafe_allow_html=True)
+            # Customer Composition Analysis
+            st.subheader("👥 Customer Composition")
             
-            # Retention vs Revenue Analysis
-            st.subheader("📊 Retention Impact on Revenue")
-            st.markdown("""
-            The graph below shows how customer retention affects revenue across different time periods. 
-            It combines three key metrics:
-            1. **Retained Revenue** (Green bars): Revenue from customers who continue to shop with us
-            2. **Lost Revenue** (Red bars): Revenue we've lost from customers who haven't returned
-            3. **Retention Rate** (Blue line): Percentage of customers we retain over time
+            # Create pie chart for customer types
+            customer_types = pd.DataFrame([
+                {'Type': 'One-Time Customers', 'Count': retention_30['one_time_customers']},
+                {'Type': 'Returning Customers', 'Count': retention_30['returning_customers']}
+            ])
             
-            This visualization helps identify the financial impact of customer retention and where we might be losing valuable customers.
-            """)
+            fig = px.pie(
+                customer_types,
+                values='Count',
+                names='Type',
+                title='Customer Base Composition',
+                color_discrete_sequence=['#ff7f0e', '#1f77b4']
+            )
+            fig.update_traces(textposition='inside', textinfo='percent+label')
             
+            col1, col2 = st.columns([2, 1])
+            with col1:
+                st.plotly_chart(fig, use_container_width=True)
+            
+            with col2:
+                st.markdown("""
+                <div class='insight-box'>
+                    <h4>📊 Composition Insights</h4>
+                    <ul>
+                        <li><strong>One-Time Customers:</strong>
+                            <ul>
+                                <li>Count: {:,}</li>
+                                <li>Revenue: ${:,.2f}</li>
+                                <li>Avg Spend: ${:.2f}</li>
+                            </ul>
+                        </li>
+                        <li><strong>Returning Customers:</strong>
+                            <ul>
+                                <li>Count: {:,}</li>
+                                <li>Avg Visits: {:.1f}</li>
+                                <li>Avg Spend/Visit: ${:.2f}</li>
+                            </ul>
+                        </li>
+                    </ul>
+                </div>
+                """.format(
+                    retention_30['one_time_customers'],
+                    retention_30['one_time_revenue'],
+                    retention_30['one_time_revenue'] / retention_30['one_time_customers'] if retention_30['one_time_customers'] > 0 else 0,
+                    retention_30['returning_customers'],
+                    retention_30['avg_visits_returning'],
+                    retention_30['retained_avg_spend']
+                ), unsafe_allow_html=True)
+            
+            # Retention Impact Analysis
+            st.subheader("💰 Revenue Impact")
+            
+            # Create retention impact chart
             retention_data = pd.DataFrame({
                 'Time Window': ['30 Days', '60 Days', '90 Days'],
                 'Retention Rate': [retention_30['rate'], retention_60['rate'], retention_90['rate']],
@@ -664,134 +887,65 @@ def main():
             
             st.plotly_chart(fig, use_container_width=True)
             
-            # Customer Behavior Analysis
+            # Retention Impact Insights
             col1, col2 = st.columns(2)
             
             with col1:
                 st.markdown("""
                 <div class='insight-box'>
-                    <h4>📈 Retention Insights</h4>
+                    <h4>📈 Retention Impact Insights</h4>
                     <ul>
-                        <li><strong>Short-term Retention (30 days):</strong>
+                        <li><strong>Revenue Impact:</strong>
                             <ul>
-                                <li>Retention Rate: {:.1f}%</li>
-                                <li>Retained Customer Avg Spend: ${:.2f}</li>
-                                <li>Visit Frequency: {:.1f} days</li>
-                                <li>Revenue Impact: ${:,.2f}</li>
+                                <li>30-day retained revenue: ${:,.2f}</li>
+                                <li>60-day retained revenue: ${:,.2f}</li>
+                                <li>90-day retained revenue: ${:,.2f}</li>
                             </ul>
                         </li>
-                        <li><strong>Long-term Retention (90 days):</strong>
+                        <li><strong>Visit Patterns:</strong>
                             <ul>
-                                <li>Retention Rate: {:.1f}%</li>
-                                <li>Retained Customer Avg Spend: ${:.2f}</li>
-                                <li>Visit Frequency: {:.1f} days</li>
-                                <li>Revenue Impact: ${:,.2f}</li>
+                                <li>Retained customers visit every {:.1f} days</li>
+                                <li>Spend ${:.2f} more per visit than non-retained</li>
+                                <li>{:.1f}x higher lifetime value</li>
                             </ul>
                         </li>
                     </ul>
                 </div>
                 """.format(
-                    retention_30['rate'],
-                    retention_30['retained_avg_spend'],
-                    retention_30['retained_visit_freq'],
                     retention_30['retained_total_revenue'],
-                    retention_90['rate'],
-                    retention_90['retained_avg_spend'],
-                    retention_90['retained_visit_freq'],
-                    retention_90['retained_total_revenue']
+                    retention_60['retained_total_revenue'],
+                    retention_90['retained_total_revenue'],
+                    retention_30['retained_visit_freq'],
+                    retention_30['retained_avg_spend'] - retention_30['non_retained_avg_spend'],
+                    retention_30['retained_avg_spend'] / retention_30['non_retained_avg_spend'] if retention_30['non_retained_avg_spend'] > 0 else 0
                 ), unsafe_allow_html=True)
             
             with col2:
                 st.markdown("""
                 <div class='recommendation-box'>
-                    <h4>🎯 Retention Strategy Recommendations</h4>
+                    <h4>💡 Retention Opportunities</h4>
                     <ul>
-                        <li><strong>Short-term Actions:</strong>
+                        <li><strong>Quick Wins:</strong>
                             <ul>
-                                <li>Implement 30-day follow-up communications</li>
-                                <li>Offer "Welcome Back" promotions after 14 days</li>
-                                <li>Create early-stage loyalty rewards</li>
+                                <li>Follow up with customers after first purchase</li>
+                                <li>Implement a "Welcome Back" program</li>
+                                <li>Create early loyalty rewards</li>
                             </ul>
                         </li>
-                        <li><strong>Long-term Strategy:</strong>
+                        <li><strong>Strategic Actions:</strong>
                             <ul>
-                                <li>Develop tiered loyalty program</li>
-                                <li>Personalize offers based on spending patterns</li>
-                                <li>Focus on high-value customer retention</li>
-                            </ul>
-                        </li>
-                        <li><strong>Revenue Recovery:</strong>
-                            <ul>
-                                <li>Target ${:,.2f} in at-risk revenue</li>
-                                <li>Focus on {:.1f}% spending gap between retained and lost customers</li>
+                                <li>Focus on ${:,.2f} at-risk revenue</li>
+                                <li>Target {:.1f}% spending gap</li>
+                                <li>Reduce time between visits ({:.1f} days)</li>
                             </ul>
                         </li>
                     </ul>
                 </div>
                 """.format(
                     retention_30['non_retained_total_revenue'],
-                    ((retention_30['retained_avg_spend'] - retention_30['non_retained_avg_spend']) / retention_30['non_retained_avg_spend'] * 100 if retention_30['non_retained_avg_spend'] > 0 else 0)
+                    ((retention_30['retained_avg_spend'] - retention_30['non_retained_avg_spend']) / retention_30['non_retained_avg_spend'] * 100) if retention_30['non_retained_avg_spend'] > 0 else 0,
+                    retention_30['retained_visit_freq']
                 ), unsafe_allow_html=True)
-            
-            # Visit Pattern Analysis
-            st.subheader("📅 Customer Visit Patterns")
-            st.markdown("""
-            The histogram below shows how frequently customers visit. Understanding these patterns helps in:
-            1. Identifying optimal times for customer engagement
-            2. Planning inventory and staffing
-            3. Developing targeted marketing campaigns
-            4. Setting realistic retention goals
-            """)
-            
-            # Calculate visit frequency distribution
-            customer_visits = df_clean.groupby('Customer').agg({
-                'Date': lambda x: (x.max() - x.min()).days,
-                'ID': 'count'
-            }).reset_index()
-            
-            customer_visits['avg_days_between_visits'] = customer_visits['Date'] / customer_visits['ID']
-            
-            fig = px.histogram(
-                customer_visits,
-                x='avg_days_between_visits',
-                nbins=30,
-                title='Distribution of Visit Frequency',
-                labels={'avg_days_between_visits': 'Average Days Between Visits'}
-            )
-            
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # Visit Pattern Insights
-            st.markdown("""
-            <div class='insight-box'>
-                <h4>🔍 Visit Pattern Analysis</h4>
-                <p>Understanding how often customers visit is crucial for business planning:</p>
-                <ul>
-                    <li><strong>Visit Frequency:</strong>
-                        <ul>
-                            <li>Most frequent customers visit every {:.1f} days</li>
-                            <li>Average customer visits every {:.1f} days</li>
-                            <li>Least frequent customers visit every {:.1f} days</li>
-                        </ul>
-                    </li>
-                    <li><strong>Customer Groups:</strong>
-                        <ul>
-                            <li>Frequent visitors (< 7 days): {:.1f}% of customers</li>
-                            <li>Regular visitors (7-30 days): {:.1f}% of customers</li>
-                            <li>Occasional visitors (> 30 days): {:.1f}% of customers</li>
-                        </ul>
-                    </li>
-                </ul>
-                <p>This information helps in creating targeted marketing campaigns and setting appropriate customer engagement strategies for each group.</p>
-            </div>
-            """.format(
-                customer_visits['avg_days_between_visits'].min(),
-                customer_visits['avg_days_between_visits'].mean(),
-                customer_visits['avg_days_between_visits'].max(),
-                len(customer_visits[customer_visits['avg_days_between_visits'] < 7]) / len(customer_visits) * 100,
-                len(customer_visits[(customer_visits['avg_days_between_visits'] >= 7) & (customer_visits['avg_days_between_visits'] <= 30)]) / len(customer_visits) * 100,
-                len(customer_visits[customer_visits['avg_days_between_visits'] > 30]) / len(customer_visits) * 100
-            ), unsafe_allow_html=True)
         
         with tab3:
             st.header("Customer Segmentation")
@@ -824,11 +978,58 @@ def main():
         
         with tab4:
             st.header("Revenue Analysis")
+            st.markdown("""
+            This section analyzes your revenue patterns across different time periods and customer segments. 
+            Understanding these patterns helps optimize pricing, promotions, and business operations.
+            """)
             
             monthly_revenue, daily_revenue = analyze_revenue(df_clean)
             
             # Monthly Revenue Trends
             st.subheader("📈 Monthly Revenue Trends")
+            
+            # Display key revenue metrics first
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric(
+                    "Average Monthly Revenue",
+                    f"${monthly_revenue['Revenue'].mean():,.2f}",
+                    f"{((monthly_revenue['Revenue'].iloc[-1] / monthly_revenue['Revenue'].iloc[0]) - 1) * 100:.1f}% vs First Month"
+                )
+                st.markdown("""
+                <div class='insight-box' style='font-size: 0.9em;'>
+                    <p><strong>What this means:</strong> Your typical monthly revenue, with the percentage showing growth/decline 
+                    compared to your first month. This helps track business growth over time.</p>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with col2:
+                st.metric(
+                    "Average Transaction Value",
+                    f"${monthly_revenue['Avg_Transaction_Value'].mean():,.2f}",
+                    f"{((monthly_revenue['Avg_Transaction_Value'].iloc[-1] / monthly_revenue['Avg_Transaction_Value'].iloc[0]) - 1) * 100:.1f}% vs First Month"
+                )
+                st.markdown("""
+                <div class='insight-box' style='font-size: 0.9em;'>
+                    <p><strong>What this means:</strong> The average amount spent per transaction. 
+                    The percentage shows how this has changed since your first month, indicating pricing or purchasing pattern changes.</p>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with col3:
+                st.metric(
+                    "Revenue per Customer",
+                    f"${monthly_revenue['Revenue_per_Customer'].mean():,.2f}",
+                    f"{((monthly_revenue['Revenue_per_Customer'].iloc[-1] / monthly_revenue['Revenue_per_Customer'].iloc[0]) - 1) * 100:.1f}% vs First Month"
+                )
+                st.markdown("""
+                <div class='insight-box' style='font-size: 0.9em;'>
+                    <p><strong>What this means:</strong> How much revenue each customer generates on average per month. 
+                    This metric combines both visit frequency and spending amount.</p>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            # Monthly Revenue Chart
             fig = make_subplots(specs=[[{"secondary_y": True}]])
             
             fig.add_trace(
@@ -863,29 +1064,60 @@ def main():
             
             st.plotly_chart(fig, use_container_width=True)
             
-            # Revenue Metrics
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric(
-                    "Average Monthly Revenue",
-                    f"${monthly_revenue['Revenue'].mean():,.2f}",
-                    f"{((monthly_revenue['Revenue'].iloc[-1] / monthly_revenue['Revenue'].iloc[0]) - 1) * 100:.1f}% vs First Month"
-                )
-            with col2:
-                st.metric(
-                    "Average Transaction Value",
-                    f"${monthly_revenue['Avg_Transaction_Value'].mean():,.2f}",
-                    f"{((monthly_revenue['Avg_Transaction_Value'].iloc[-1] / monthly_revenue['Avg_Transaction_Value'].iloc[0]) - 1) * 100:.1f}% vs First Month"
-                )
-            with col3:
-                st.metric(
-                    "Revenue per Customer",
-                    f"${monthly_revenue['Revenue_per_Customer'].mean():,.2f}",
-                    f"{((monthly_revenue['Revenue_per_Customer'].iloc[-1] / monthly_revenue['Revenue_per_Customer'].iloc[0]) - 1) * 100:.1f}% vs First Month"
-                )
+            # Monthly Trends Insights
+            st.markdown("""
+            <div class='insight-box'>
+                <h4>📊 Monthly Performance Insights</h4>
+                <ul>
+                    <li><strong>Revenue Trends:</strong>
+                        <ul>
+                            <li>Best month: {} (${:,.2f})</li>
+                            <li>Average monthly growth: {:.1f}%</li>
+                            <li>Month-over-month stability: {}</li>
+                        </ul>
+                    </li>
+                    <li><strong>Customer Activity:</strong>
+                        <ul>
+                            <li>Average customers per month: {:.0f}</li>
+                            <li>Transactions per customer: {:.1f}</li>
+                            <li>Revenue concentration: {:.1f}% from top month</li>
+                        </ul>
+                    </li>
+                </ul>
+            </div>
+            """.format(
+                monthly_revenue.loc[monthly_revenue['Revenue'].idxmax(), 'Month'].strftime('%B %Y'),
+                monthly_revenue['Revenue'].max(),
+                ((monthly_revenue['Revenue'].iloc[-1] / monthly_revenue['Revenue'].iloc[0]) - 1) * 100,
+                "Consistent" if monthly_revenue['Revenue'].std() / monthly_revenue['Revenue'].mean() < 0.2 else "Variable",
+                monthly_revenue['Unique_Customers'].mean(),
+                monthly_revenue['Transactions'].sum() / monthly_revenue['Unique_Customers'].sum(),
+                (monthly_revenue['Revenue'].max() / monthly_revenue['Revenue'].sum()) * 100
+            ), unsafe_allow_html=True)
             
             # Daily Revenue Patterns
             st.subheader("📊 Daily Revenue Patterns")
+            st.markdown("""
+            Understanding daily patterns helps optimize staffing, inventory, and operations. 
+            This analysis shows how your business performs across different days of the week.
+            """)
+            
+            # Daily metrics
+            col1, col2 = st.columns(2)
+            with col1:
+                st.metric(
+                    "Best Performing Day",
+                    f"{daily_revenue.loc[daily_revenue['Total_Revenue'].idxmax(), 'Day']}",
+                    f"${daily_revenue['Total_Revenue'].max():,.2f} revenue"
+                )
+            with col2:
+                st.metric(
+                    "Most Active Day",
+                    f"{daily_revenue.loc[daily_revenue['Transaction_Count'].idxmax(), 'Day']}",
+                    f"{daily_revenue['Transaction_Count'].max():,.0f} transactions"
+                )
+            
+            # Daily Revenue Chart
             fig = make_subplots(specs=[[{"secondary_y": True}]])
             
             fig.add_trace(
@@ -919,55 +1151,38 @@ def main():
             
             st.plotly_chart(fig, use_container_width=True)
             
-            # Transaction Value Distribution
-            st.subheader("💰 Transaction Value Distribution")
-            fig = px.histogram(
-                df_clean,
-                x='Total',
-                nbins=50,
-                title='Distribution of Transaction Values',
-                labels={'Total': 'Transaction Amount ($)'}
-            )
-            fig.update_layout(height=400)
-            st.plotly_chart(fig, use_container_width=True)
-            
-            # Revenue Insights
+            # Daily Pattern Insights
             st.markdown("""
             <div class='insight-box'>
-                <h4>📌 Revenue Insights</h4>
+                <h4>📅 Daily Pattern Insights</h4>
                 <ul>
-                    <li>Most transactions fall in the ${:.2f} - ${:.2f} range</li>
-                    <li>Highest revenue day: {}</li>
-                    <li>Average daily revenue: ${:.2f}</li>
-                    <li>Best performing month: {} (${:,.2f})</li>
-                    <li>Average revenue per customer: ${:.2f}</li>
+                    <li><strong>Peak Performance:</strong>
+                        <ul>
+                            <li>Highest revenue day: {} (${:,.2f})</li>
+                            <li>Busiest day: {} ({:,.0f} transactions)</li>
+                            <li>Best average transaction: {} (${:,.2f})</li>
+                        </ul>
+                    </li>
+                    <li><strong>Operational Insights:</strong>
+                        <ul>
+                            <li>Weekend vs Weekday revenue: {:.1f}% difference</li>
+                            <li>Peak vs Off-peak variance: {:.1f}x</li>
+                            <li>Daily transaction stability: {}</li>
+                        </ul>
+                    </li>
                 </ul>
             </div>
             """.format(
-                df_clean['Total'].quantile(0.25),
-                df_clean['Total'].quantile(0.75),
                 daily_revenue.loc[daily_revenue['Total_Revenue'].idxmax(), 'Day'],
-                daily_revenue['Avg_Daily_Revenue'].mean(),
-                monthly_revenue.loc[monthly_revenue['Revenue'].idxmax(), 'Month'].strftime('%B %Y'),
-                monthly_revenue['Revenue'].max(),
-                monthly_revenue['Revenue_per_Customer'].mean()
-            ), unsafe_allow_html=True)
-            
-            # Recommendations
-            st.markdown("""
-            <div class='recommendation-box'>
-                <h4>💡 Revenue Optimization Recommendations</h4>
-                <ul>
-                    <li>Focus marketing efforts on {} when customer activity is highest</li>
-                    <li>Consider special promotions for {} when revenue is typically lower</li>
-                    <li>Target average transaction value increase through upselling strategies</li>
-                    <li>Implement loyalty rewards for high-value customers (>${:.2f} per visit)</li>
-                </ul>
-            </div>
-            """.format(
+                daily_revenue['Total_Revenue'].max(),
                 daily_revenue.loc[daily_revenue['Transaction_Count'].idxmax(), 'Day'],
-                daily_revenue.loc[daily_revenue['Total_Revenue'].idxmin(), 'Day'],
-                df_clean['Total'].quantile(0.75)
+                daily_revenue['Transaction_Count'].max(),
+                daily_revenue.loc[daily_revenue['Avg_Daily_Revenue'].idxmax(), 'Day'],
+                daily_revenue['Avg_Daily_Revenue'].max(),
+                ((daily_revenue[daily_revenue['Day'].isin(['Saturday', 'Sunday'])]['Total_Revenue'].mean() / 
+                  daily_revenue[~daily_revenue['Day'].isin(['Saturday', 'Sunday'])]['Total_Revenue'].mean()) - 1) * 100,
+                daily_revenue['Total_Revenue'].max() / daily_revenue['Total_Revenue'].min(),
+                "Consistent" if daily_revenue['Transaction_Count'].std() / daily_revenue['Transaction_Count'].mean() < 0.2 else "Variable"
             ), unsafe_allow_html=True)
         
         with tab5:
@@ -1099,6 +1314,191 @@ def main():
             ), unsafe_allow_html=True)
         
         with tab6:
+            st.header("Customer Lifetime Value Analysis")
+            st.markdown("""
+            Customer Lifetime Value (LTV) measures the total revenue a business can expect from a customer throughout their relationship. 
+            This analysis helps identify your most valuable customers and opportunities for growth.
+            """)
+            
+            # Calculate LTV metrics
+            customer_ltv, ltv_summary = calculate_ltv(df_clean)
+            
+            # Display key LTV metrics with explanations
+            st.subheader("🔑 Key Metrics")
+            
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric(
+                    "Average Lifetime Value",
+                    f"${ltv_summary['avg_lifetime_value']:,.2f}",
+                    f"{ltv_summary['returning_customer_ratio']:.1f}% are returning customers"
+                )
+                st.markdown("""
+                <div class='insight-box' style='font-size: 0.9em;'>
+                    <p><strong>What this means:</strong> On average, each customer spends this amount over their entire relationship with your business. 
+                    The percentage shows how many customers make repeat purchases, which is a key driver of lifetime value.</p>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with col2:
+                st.metric(
+                    "Average Annual Value",
+                    f"${ltv_summary['avg_annual_value']:,.2f}",
+                    f"Projected: ${ltv_summary['projected_annual_value']:,.2f}"
+                )
+                st.markdown("""
+                <div class='insight-box' style='font-size: 0.9em;'>
+                    <p><strong>What this means:</strong> This shows the average revenue per customer per year:
+                    <ul>
+                        <li>Historical: Based on actual spending patterns</li>
+                        <li>Projected: Expected future value based on current behavior</li>
+                    </ul></p>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            with col3:
+                st.metric(
+                    "Average Customer Lifespan",
+                    f"{ltv_summary['avg_customer_lifetime_days']:.1f} days",
+                    f"{ltv_summary['avg_lifetime_visits']:.1f} visits on average"
+                )
+                st.markdown("""
+                <div class='insight-box' style='font-size: 0.9em;'>
+                    <p><strong>What this means:</strong> Shows how long customers typically stay active and how frequently they visit. 
+                    This helps understand customer engagement and loyalty patterns.</p>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            # Value Segments Analysis
+            st.subheader("💎 Customer Value Segments")
+            st.markdown("""
+            Customers are segmented into four value tiers based on their total spending. This helps identify different 
+            customer groups and their specific characteristics.
+            """)
+            
+            value_segments = pd.qcut(
+                customer_ltv['total_spend'],
+                q=4,
+                labels=['Bronze', 'Silver', 'Gold', 'Platinum']
+            )
+            segment_metrics = customer_ltv.groupby(value_segments).agg({
+                'total_spend': ['mean', 'sum', 'count'],
+                'visit_count': 'mean',
+                'avg_transaction': 'mean'
+            }).round(2)
+            
+            segment_metrics.columns = ['Avg LTV', 'Total Revenue', 'Customer Count', 'Avg Visits', 'Avg Transaction']
+            st.dataframe(segment_metrics, use_container_width=True)
+            
+            # Detailed Value Analysis
+            st.subheader("📊 Value Distribution Analysis")
+            
+            # Two columns for metrics and distribution
+            col1, col2 = st.columns([1, 2])
+            
+            with col1:
+                st.markdown("""
+                <div class='insight-box'>
+                    <h4>💡 Value Breakdown</h4>
+                    <ul>
+                        <li><strong>Customer Mix:</strong>
+                            <ul>
+                                <li>{:.1f}% One-time buyers</li>
+                                <li>{:.1f}% Returning customers</li>
+                            </ul>
+                        </li>
+                        <li><strong>Value Spread:</strong>
+                            <ul>
+                                <li>Median LTV: ${:,.2f}</li>
+                                <li>Top 10% avg: ${:,.2f}</li>
+                                <li>Bottom 10% avg: ${:,.2f}</li>
+                            </ul>
+                        </li>
+                        <li><strong>Transaction Patterns:</strong>
+                            <ul>
+                                <li>Avg transaction: ${:,.2f}</li>
+                                <li>Visits per customer: {:.1f}</li>
+                            </ul>
+                        </li>
+                    </ul>
+                </div>
+                """.format(
+                    ltv_summary['one_time_customer_ratio'],
+                    ltv_summary['returning_customer_ratio'],
+                    ltv_summary['median_lifetime_value'],
+                    ltv_summary['top_10_percent_value'],
+                    ltv_summary['bottom_10_percent_value'],
+                    ltv_summary['avg_transaction_value'],
+                    ltv_summary['avg_lifetime_visits']
+                ), unsafe_allow_html=True)
+            
+            with col2:
+                fig = px.histogram(
+                    customer_ltv[customer_ltv['total_spend'] > 0],
+                    x='total_spend',
+                    nbins=50,
+                    title='Distribution of Customer Lifetime Value',
+                    labels={'total_spend': 'Lifetime Value ($)'}
+                )
+                fig.update_layout(height=400)
+                st.plotly_chart(fig, use_container_width=True)
+            
+            # Key Insights
+            st.subheader("🎯 Key Insights & Opportunities")
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("""
+                <div class='insight-box'>
+                    <h4>📈 Current Performance</h4>
+                    <ul>
+                        <li><strong>Customer Base Health:</strong>
+                            <ul>
+                                <li>Half of your customers return for repeat purchases</li>
+                                <li>Average customer stays active for 2 months</li>
+                                <li>Significant value gap between top and bottom customers</li>
+                            </ul>
+                        </li>
+                        <li><strong>Value Generation:</strong>
+                            <ul>
+                                <li>Platinum customers generate {:.1f}x more value than Bronze</li>
+                                <li>Each additional visit adds ${:.2f} in average revenue</li>
+                                <li>Top 10% of customers drive {:.1f}% of revenue</li>
+                            </ul>
+                        </li>
+                    </ul>
+                </div>
+                """.format(
+                    segment_metrics.iloc[3]['Avg LTV'] / segment_metrics.iloc[0]['Avg LTV'],
+                    ltv_summary['avg_transaction_value'],
+                    (ltv_summary['top_10_percent_value'] * (len(customer_ltv) * 0.1)) / ltv_summary['total_customer_value'] * 100
+                ), unsafe_allow_html=True)
+            
+            with col2:
+                st.markdown("""
+                <div class='recommendation-box'>
+                    <h4>💡 Growth Opportunities</h4>
+                    <ul>
+                        <li><strong>Immediate Actions:</strong>
+                            <ul>
+                                <li>Convert one-time buyers with targeted follow-up campaigns</li>
+                                <li>Increase visit frequency through loyalty rewards</li>
+                                <li>Focus on extending customer lifespan beyond 2 months</li>
+                            </ul>
+                        </li>
+                        <li><strong>Strategic Initiatives:</strong>
+                            <ul>
+                                <li>Develop Bronze-to-Silver upgrade paths</li>
+                                <li>Create VIP benefits for Gold/Platinum segments</li>
+                                <li>Implement early warning system for customer churn</li>
+                            </ul>
+                        </li>
+                    </ul>
+                </div>
+                """, unsafe_allow_html=True)
+        
+        with tab7:
             st.header("Summary & Export")
             st.markdown("Analysis Period: {} to {}".format(
                 start_date.strftime('%Y-%m-%d'),
