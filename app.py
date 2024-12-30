@@ -87,21 +87,37 @@ def calculate_repurchase_rate(df, window_days):
     # First, get first and last purchase dates for each customer
     customer_purchases = df.groupby('Customer').agg({
         'Date': ['min', 'max'],
-        'ID': 'count'
+        'ID': 'count',
+        'Total': ['sum', 'mean']
     })
     
     # Reset index and rename columns properly
     customer_purchases.reset_index(inplace=True)
-    customer_purchases.columns = ['Customer', 'first_purchase', 'last_purchase', 'total_purchases']
+    customer_purchases.columns = ['Customer', 'first_purchase', 'last_purchase', 'visit_count', 'total_spend', 'avg_spend']
     
     # Calculate time difference between first and last purchase
     customer_purchases['days_between'] = (customer_purchases['last_purchase'] - customer_purchases['first_purchase']).dt.days
+    customer_purchases['avg_days_between_visits'] = customer_purchases['days_between'] / customer_purchases['visit_count']
     
     # Count customers who returned within window
     returned = customer_purchases[customer_purchases['days_between'] >= window_days]['Customer'].count()
     total_customers = len(customer_purchases)
     
-    return (returned / total_customers * 100) if total_customers > 0 else 0
+    # Calculate average spend for retained vs non-retained customers
+    retained_customers = customer_purchases[customer_purchases['days_between'] >= window_days]
+    non_retained_customers = customer_purchases[customer_purchases['days_between'] < window_days]
+    
+    retention_stats = {
+        'rate': (returned / total_customers * 100) if total_customers > 0 else 0,
+        'retained_avg_spend': retained_customers['avg_spend'].mean() if not retained_customers.empty else 0,
+        'non_retained_avg_spend': non_retained_customers['avg_spend'].mean() if not non_retained_customers.empty else 0,
+        'retained_visit_freq': retained_customers['avg_days_between_visits'].mean() if not retained_customers.empty else 0,
+        'non_retained_visit_freq': non_retained_customers['avg_days_between_visits'].mean() if not non_retained_customers.empty else 0,
+        'retained_total_revenue': retained_customers['total_spend'].sum() if not retained_customers.empty else 0,
+        'non_retained_total_revenue': non_retained_customers['total_spend'].sum() if not non_retained_customers.empty else 0
+    }
+    
+    return retention_stats
 
 def calculate_revenue_retention(df):
     """Calculate revenue retention rate by month with improved handling."""
@@ -237,12 +253,12 @@ def analyze_clients(df_clean, customer_metrics):
     )
     
     return {
-        'top_spenders': top_spenders,
-        'most_frequent': most_frequent,
-        'lost_valuable': lost_valuable,
-        'recent_new': recent_new,
-        'at_risk': at_risk,
-        'best_improvers': best_improvers,
+        'top_spenders': top_spenders.reset_index(drop=True),
+        'most_frequent': most_frequent.reset_index(drop=True),
+        'lost_valuable': lost_valuable.reset_index(drop=True),
+        'recent_new': recent_new.reset_index(drop=True),
+        'at_risk': at_risk.reset_index(drop=True),
+        'best_improvers': best_improvers.reset_index(drop=True),
         'improvement_stats': {
             'avg_improvement': best_improvers['improvement_percent'].mean(),
             'total_revenue': best_improvers['total_spend'].sum(),
@@ -298,16 +314,16 @@ def create_excel_report(df_clean, customer_segments, segment_metrics, repurchase
                 'Total Revenue',
                 'Average Transaction Value',
                 'Total Transactions',
-                '30-Day Repurchase Rate',
-                '90-Day Repurchase Rate'
+                '30-Day Retention Rate',
+                '90-Day Retention Rate'
             ],
             'Value': [
                 f"{df_clean['Customer'].nunique():,}",
                 f"${df_clean['Total'].sum():,.2f}",
                 f"${df_clean['Total'].mean():.2f}",
                 f"{len(df_clean):,}",
-                f"{repurchase_data.iloc[0]['Rate']:.1f}%",
-                f"{repurchase_data.iloc[2]['Rate']:.1f}%"
+                f"{repurchase_data['rate']:.1f}%",
+                f"{repurchase_data['rate']:.1f}%"
             ]
         })
         summary_df.to_excel(writer, sheet_name='Executive Summary', index=False)
@@ -401,15 +417,15 @@ def main():
         transactions_count = len(df_clean)
         
         # Calculate retention rates
-        rate_30 = calculate_repurchase_rate(df_clean, 30)
-        rate_60 = calculate_repurchase_rate(df_clean, 60)
-        rate_90 = calculate_repurchase_rate(df_clean, 90)
+        retention_30 = calculate_repurchase_rate(df_clean, 30)
+        retention_60 = calculate_repurchase_rate(df_clean, 60)
+        retention_90 = calculate_repurchase_rate(df_clean, 90)
         
         # Create repurchase data DataFrame
         repurchase_data = pd.DataFrame([
-            {'Window': '30 Days', 'Rate': rate_30},
-            {'Window': '60 Days', 'Rate': rate_60},
-            {'Window': '90 Days', 'Rate': rate_90}
+            {'Window': '30 Days', 'Rate': retention_30['rate']},
+            {'Window': '60 Days', 'Rate': retention_60['rate']},
+            {'Window': '90 Days', 'Rate': retention_90['rate']}
         ])
         
         # Calculate customer segments
@@ -470,54 +486,244 @@ def main():
         with tab2:
             st.header("Customer Retention Analysis")
             st.markdown("""
-            This section shows how well your business retains customers over different time periods.
-            A higher repurchase rate indicates stronger customer loyalty.
+            This section provides a detailed analysis of customer retention patterns and their impact on revenue.
+            Understanding these metrics helps identify opportunities to improve customer loyalty and revenue stability.
             """)
             
+            # Calculate retention metrics for different time windows
+            retention_30 = calculate_repurchase_rate(df_clean, 30)
+            retention_60 = calculate_repurchase_rate(df_clean, 60)
+            retention_90 = calculate_repurchase_rate(df_clean, 90)
+            
+            # Display retention rates
             col1, col2, col3 = st.columns(3)
+            
             with col1:
-                rate_30 = calculate_repurchase_rate(df_clean, 30)
-                st.metric("30-Day Repurchase", f"{rate_30:.1f}%")
+                st.metric(
+                    "30-Day Retention",
+                    f"{retention_30['rate']:.1f}%",
+                    f"${retention_30['retained_avg_spend']:.2f} avg spend"
+                )
+            
             with col2:
-                rate_60 = calculate_repurchase_rate(df_clean, 60)
-                st.metric("60-Day Repurchase", f"{rate_60:.1f}%")
+                st.metric(
+                    "60-Day Retention",
+                    f"{retention_60['rate']:.1f}%",
+                    f"${retention_60['retained_avg_spend']:.2f} avg spend"
+                )
+            
             with col3:
-                rate_90 = calculate_repurchase_rate(df_clean, 90)
-                st.metric("90-Day Repurchase", f"{rate_90:.1f}%")
+                st.metric(
+                    "90-Day Retention",
+                    f"{retention_90['rate']:.1f}%",
+                    f"${retention_90['retained_avg_spend']:.2f} avg spend"
+                )
             
-            repurchase_data = pd.DataFrame({
-                'Window': ['30 Days', '60 Days', '90 Days'],
-                'Rate': [rate_30, rate_60, rate_90]
-            })
-            
-            fig = px.bar(
-                repurchase_data,
-                x='Window',
-                y='Rate',
-                title='Repurchase Rates by Time Window',
-                labels={'Rate': 'Repurchase Rate (%)'}
-            )
-            st.plotly_chart(fig, use_container_width=True)
-            
-            st.markdown(f"""
+            # Explanation of retention metrics
+            st.markdown("""
             <div class='insight-box'>
-                <h4>📌 What This Means</h4>
+                <h4>📊 Understanding Retention Metrics</h4>
+                <p>The metrics above show how well we retain customers over different time periods:</p>
                 <ul>
-                    <li>{rate_30:.1f}% of customers return within 30 days</li>
-                    <li>{rate_90:.1f}% of customers return within 90 days</li>
-                    <li>The trend {'increases' if rate_90 > rate_30 else 'decreases'} over time</li>
+                    <li><strong>30-Day Retention:</strong> Percentage of customers who return within a month. This is a key indicator of short-term customer satisfaction.</li>
+                    <li><strong>60-Day Retention:</strong> Medium-term retention showing customer loyalty over two months.</li>
+                    <li><strong>90-Day Retention:</strong> Long-term retention indicating strong customer relationships.</li>
                 </ul>
-            </div>
-            
-            <div class='recommendation-box'>
-                <h4>💡 Recommendations</h4>
-                <ul>
-                    <li>{'Consider implementing a loyalty program to improve retention' if rate_30 < 30 else 'Your retention rate is healthy'}</li>
-                    <li>Focus on engaging customers during the first 30 days</li>
-                    <li>Monitor customer feedback to identify areas for improvement</li>
-                </ul>
+                <p>The "avg spend" below each percentage shows how much retained customers typically spend, helping identify the value of retained customers.</p>
             </div>
             """, unsafe_allow_html=True)
+            
+            # Retention vs Revenue Analysis
+            st.subheader("📊 Retention Impact on Revenue")
+            st.markdown("""
+            The graph below shows how customer retention affects revenue across different time periods. 
+            It combines three key metrics:
+            1. **Retained Revenue** (Green bars): Revenue from customers who continue to shop with us
+            2. **Lost Revenue** (Red bars): Revenue we've lost from customers who haven't returned
+            3. **Retention Rate** (Blue line): Percentage of customers we retain over time
+            
+            This visualization helps identify the financial impact of customer retention and where we might be losing valuable customers.
+            """)
+            
+            retention_data = pd.DataFrame({
+                'Time Window': ['30 Days', '60 Days', '90 Days'],
+                'Retention Rate': [retention_30['rate'], retention_60['rate'], retention_90['rate']],
+                'Retained Revenue': [retention_30['retained_total_revenue'], retention_60['retained_total_revenue'], retention_90['retained_total_revenue']],
+                'Lost Revenue': [retention_30['non_retained_total_revenue'], retention_60['non_retained_total_revenue'], retention_90['non_retained_total_revenue']]
+            })
+            
+            fig = make_subplots(specs=[[{"secondary_y": True}]])
+            
+            fig.add_trace(
+                go.Bar(
+                    x=retention_data['Time Window'],
+                    y=retention_data['Retained Revenue'],
+                    name="Retained Revenue",
+                    marker_color='#2ecc71'
+                ),
+                secondary_y=False
+            )
+            
+            fig.add_trace(
+                go.Bar(
+                    x=retention_data['Time Window'],
+                    y=retention_data['Lost Revenue'],
+                    name="Lost Revenue",
+                    marker_color='#e74c3c'
+                ),
+                secondary_y=False
+            )
+            
+            fig.add_trace(
+                go.Scatter(
+                    x=retention_data['Time Window'],
+                    y=retention_data['Retention Rate'],
+                    name="Retention Rate",
+                    marker_color='#3498db',
+                    mode='lines+markers'
+                ),
+                secondary_y=True
+            )
+            
+            fig.update_layout(
+                title="Revenue Impact of Customer Retention",
+                barmode='stack',
+                height=400
+            )
+            
+            fig.update_yaxes(title_text="Revenue ($)", secondary_y=False)
+            fig.update_yaxes(title_text="Retention Rate (%)", secondary_y=True)
+            
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Customer Behavior Analysis
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("""
+                <div class='insight-box'>
+                    <h4>📈 Retention Insights</h4>
+                    <ul>
+                        <li><strong>Short-term Retention (30 days):</strong>
+                            <ul>
+                                <li>Retention Rate: {:.1f}%</li>
+                                <li>Retained Customer Avg Spend: ${:.2f}</li>
+                                <li>Visit Frequency: {:.1f} days</li>
+                                <li>Revenue Impact: ${:,.2f}</li>
+                            </ul>
+                        </li>
+                        <li><strong>Long-term Retention (90 days):</strong>
+                            <ul>
+                                <li>Retention Rate: {:.1f}%</li>
+                                <li>Retained Customer Avg Spend: ${:.2f}</li>
+                                <li>Visit Frequency: {:.1f} days</li>
+                                <li>Revenue Impact: ${:,.2f}</li>
+                            </ul>
+                        </li>
+                    </ul>
+                </div>
+                """.format(
+                    retention_30['rate'],
+                    retention_30['retained_avg_spend'],
+                    retention_30['retained_visit_freq'],
+                    retention_30['retained_total_revenue'],
+                    retention_90['rate'],
+                    retention_90['retained_avg_spend'],
+                    retention_90['retained_visit_freq'],
+                    retention_90['retained_total_revenue']
+                ), unsafe_allow_html=True)
+            
+            with col2:
+                st.markdown("""
+                <div class='recommendation-box'>
+                    <h4>🎯 Retention Strategy Recommendations</h4>
+                    <ul>
+                        <li><strong>Short-term Actions:</strong>
+                            <ul>
+                                <li>Implement 30-day follow-up communications</li>
+                                <li>Offer "Welcome Back" promotions after 14 days</li>
+                                <li>Create early-stage loyalty rewards</li>
+                            </ul>
+                        </li>
+                        <li><strong>Long-term Strategy:</strong>
+                            <ul>
+                                <li>Develop tiered loyalty program</li>
+                                <li>Personalize offers based on spending patterns</li>
+                                <li>Focus on high-value customer retention</li>
+                            </ul>
+                        </li>
+                        <li><strong>Revenue Recovery:</strong>
+                            <ul>
+                                <li>Target ${:,.2f} in at-risk revenue</li>
+                                <li>Focus on {:.1f}% spending gap between retained and lost customers</li>
+                            </ul>
+                        </li>
+                    </ul>
+                </div>
+                """.format(
+                    retention_30['non_retained_total_revenue'],
+                    ((retention_30['retained_avg_spend'] - retention_30['non_retained_avg_spend']) / retention_30['non_retained_avg_spend'] * 100 if retention_30['non_retained_avg_spend'] > 0 else 0)
+                ), unsafe_allow_html=True)
+            
+            # Visit Pattern Analysis
+            st.subheader("📅 Customer Visit Patterns")
+            st.markdown("""
+            The histogram below shows how frequently customers visit. Understanding these patterns helps in:
+            1. Identifying optimal times for customer engagement
+            2. Planning inventory and staffing
+            3. Developing targeted marketing campaigns
+            4. Setting realistic retention goals
+            """)
+            
+            # Calculate visit frequency distribution
+            customer_visits = df_clean.groupby('Customer').agg({
+                'Date': lambda x: (x.max() - x.min()).days,
+                'ID': 'count'
+            }).reset_index()
+            
+            customer_visits['avg_days_between_visits'] = customer_visits['Date'] / customer_visits['ID']
+            
+            fig = px.histogram(
+                customer_visits,
+                x='avg_days_between_visits',
+                nbins=30,
+                title='Distribution of Visit Frequency',
+                labels={'avg_days_between_visits': 'Average Days Between Visits'}
+            )
+            
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Visit Pattern Insights
+            st.markdown("""
+            <div class='insight-box'>
+                <h4>🔍 Visit Pattern Analysis</h4>
+                <p>Understanding how often customers visit is crucial for business planning:</p>
+                <ul>
+                    <li><strong>Visit Frequency:</strong>
+                        <ul>
+                            <li>Most frequent customers visit every {:.1f} days</li>
+                            <li>Average customer visits every {:.1f} days</li>
+                            <li>Least frequent customers visit every {:.1f} days</li>
+                        </ul>
+                    </li>
+                    <li><strong>Customer Groups:</strong>
+                        <ul>
+                            <li>Frequent visitors (< 7 days): {:.1f}% of customers</li>
+                            <li>Regular visitors (7-30 days): {:.1f}% of customers</li>
+                            <li>Occasional visitors (> 30 days): {:.1f}% of customers</li>
+                        </ul>
+                    </li>
+                </ul>
+                <p>This information helps in creating targeted marketing campaigns and setting appropriate customer engagement strategies for each group.</p>
+            </div>
+            """.format(
+                customer_visits['avg_days_between_visits'].min(),
+                customer_visits['avg_days_between_visits'].mean(),
+                customer_visits['avg_days_between_visits'].max(),
+                len(customer_visits[customer_visits['avg_days_between_visits'] < 7]) / len(customer_visits) * 100,
+                len(customer_visits[(customer_visits['avg_days_between_visits'] >= 7) & (customer_visits['avg_days_between_visits'] <= 30)]) / len(customer_visits) * 100,
+                len(customer_visits[customer_visits['avg_days_between_visits'] > 30]) / len(customer_visits) * 100
+            ), unsafe_allow_html=True)
         
         with tab3:
             st.header("Customer Segmentation")
@@ -546,7 +752,7 @@ def main():
             """, unsafe_allow_html=True)
             
             st.write("Segment Performance Metrics:")
-            st.dataframe(segment_metrics, use_container_width=True)
+            st.dataframe(segment_metrics.set_index('Segment'), use_container_width=True)
         
         with tab4:
             st.header("Revenue Analysis")
@@ -702,7 +908,7 @@ def main():
             client_analysis = analyze_clients(df_clean, customer_segments)
             
             st.subheader("🌟 Top Spenders")
-            st.dataframe(client_analysis['top_spenders'], use_container_width=True)
+            st.dataframe(client_analysis['top_spenders'].set_index('Customer'), use_container_width=True)
             
             st.markdown("""
             <div class='insight-box'>
@@ -724,7 +930,7 @@ def main():
             ), unsafe_allow_html=True)
             
             st.subheader("🔄 Most Frequent Customers")
-            st.dataframe(client_analysis['most_frequent'], use_container_width=True)
+            st.dataframe(client_analysis['most_frequent'].set_index('Customer'), use_container_width=True)
             
             st.markdown("""
             <div class='insight-box'>
@@ -747,7 +953,7 @@ def main():
             
             with col1:
                 st.subheader("⚠️ Lost Valuable Customers")
-                st.dataframe(client_analysis['lost_valuable'], use_container_width=True)
+                st.dataframe(client_analysis['lost_valuable'].set_index('Customer'), use_container_width=True)
                 
                 st.markdown("""
                 <div class='recommendation-box'>
@@ -769,7 +975,7 @@ def main():
             
             with col2:
                 st.subheader("⚡ At-Risk Customers")
-                st.dataframe(client_analysis['at_risk'], use_container_width=True)
+                st.dataframe(client_analysis['at_risk'].set_index('Customer'), use_container_width=True)
                 
                 st.markdown("""
                 <div class='recommendation-box'>
@@ -792,7 +998,7 @@ def main():
             
             with col3:
                 st.subheader("🆕 Recent New Customers")
-                st.dataframe(client_analysis['recent_new'], use_container_width=True)
+                st.dataframe(client_analysis['recent_new'].set_index('Customer'), use_container_width=True)
                 
                 st.markdown("""
                 <div class='insight-box'>
@@ -813,7 +1019,7 @@ def main():
             
             with col4:
                 st.subheader("📈 Best Improving Customers")
-                st.dataframe(client_analysis['best_improvers'], use_container_width=True)
+                st.dataframe(client_analysis['best_improvers'].set_index('Customer'), use_container_width=True)
                 
                 st.markdown("""
                 <div class='insight-box'>
@@ -834,29 +1040,38 @@ def main():
         
         with tab6:
             st.header("Summary & Export")
-            st.markdown(f"""
-            This analysis covers loyalty customers from {start_date} to {end_date}.
-            """)
+            st.markdown("Analysis Period: {} to {}".format(
+                start_date.strftime('%Y-%m-%d'),
+                end_date.strftime('%Y-%m-%d')
+            ))
             
-            st.markdown(f"""
+            st.markdown("""
             <div class='insight-box'>
                 <h4>📌 Key Findings</h4>
                 <ul>
-                    <li>Customer Base: {total_customers:,} unique loyalty customers</li>
-                    <li>Revenue Performance: ${total_revenue:,.2f} total revenue</li>
-                    <li>Customer Retention: {rate_30:.1f}% 30-day repurchase rate</li>
-                    <li>Top Customer Segment: {customer_segments['segment'].value_counts().index[0]}</li>
-                    <li>Lost Valuable Customers: {len(client_analysis['lost_valuable'])}</li>
-                    <li>New Customers (Last 30 Days): {len(client_analysis['recent_new'])}</li>
+                    <li>Customer Base: {:,} unique loyalty customers</li>
+                    <li>Revenue Performance: ${:,.2f} total revenue</li>
+                    <li>Customer Retention: {:.1f}% 30-day repurchase rate</li>
+                    <li>Top Customer Segment: {}</li>
+                    <li>Lost Valuable Customers: {}</li>
+                    <li>New Customers (Last 30 Days): {}</li>
                 </ul>
             </div>
-            """, unsafe_allow_html=True)
+            """.format(
+                total_customers,
+                total_revenue,
+                retention_30['rate'],
+                customer_segments['segment'].value_counts().index[0],
+                len(client_analysis['lost_valuable']),
+                len(client_analysis['recent_new'])
+            ), unsafe_allow_html=True)
             
+            # Calculate Excel report
             excel_report = create_excel_report(
                 df_clean,
                 customer_segments,
                 segment_metrics,
-                repurchase_data,
+                retention_30,
                 retention_data,
                 client_analysis
             )
