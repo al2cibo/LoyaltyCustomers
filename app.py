@@ -63,8 +63,25 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-def clean_data(df):
+def clean_data(df, additional_excluded_clients=None):
     """Clean and prepare the data for analysis."""
+    # List of staff members to exclude
+    staff_members = [
+        'Steve Scarver',
+        'Rayvin Womack',
+        'Breonna Holmes',
+        'Angela King',
+        'Nadia Jackson',
+        'Rosalind Swain',
+        'Alaina Sledge',
+        'Brigitte Moore',
+        'Jenaya Brooks',
+        'Mercede Brooks'
+    ]
+    
+    # Combine staff members with additional excluded clients
+    excluded_clients = staff_members + (additional_excluded_clients or [])
+    
     # Convert date to datetime
     df['Date'] = pd.to_datetime(df['Date'])
     
@@ -74,8 +91,12 @@ def clean_data(df):
     # Filter for completed transactions only
     df = df[df['Completed'] == 'Yes']
     
-    # Filter for loyalty customers (non-empty Customer field)
-    df = df[df['Customer'].notna() & (df['Customer'] != '')]
+    # Filter for loyalty customers (non-empty Customer field) and exclude staff members
+    df = df[
+        df['Customer'].notna() & 
+        (df['Customer'] != '') & 
+        ~df['Customer'].str.upper().isin([name.upper() for name in excluded_clients])
+    ]
     
     # Remove negative values
     df = df[df['Total'] >= 0]
@@ -377,7 +398,7 @@ def main():
     uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
     
     if uploaded_file is not None:
-        # Load and clean data
+        # Load data
         df = pd.read_csv(uploaded_file)
         
         # Add date range selector
@@ -399,8 +420,55 @@ def main():
             max_value=max_date
         )
         
-        # Clean data and filter by date range
-        df_clean = clean_data(df)
+        # Add client filter section
+        st.sidebar.header("👥 Client Filter")
+        
+        # Get all unique customers
+        all_customers = sorted(df[df['Customer'].notna()]['Customer'].unique())
+        
+        # Staff members that should be excluded
+        staff_members = [
+            'Steve Scarver',
+            'Rayvin Womack',
+            'Breonna Holmes',
+            'Angela King',
+            'Nadia Jackson',
+            'Rosalind Swain',
+            'Alaina Sledge',
+            'Brigitte Moore',
+            'Jenaya Brooks',
+            'Mercede Brooks'
+        ]
+        
+        # Find which staff members exist in the data (case-insensitive)
+        all_customers_upper = [c.upper() for c in all_customers]
+        existing_staff = [
+            customer for customer in all_customers
+            if any(staff.upper() == customer.upper() for staff in staff_members)
+        ]
+        
+        # Create a search box for clients
+        client_search = st.sidebar.text_input(
+            "Search Clients",
+            help="Type to search for specific clients"
+        ).upper()
+        
+        # Filter the customer list based on search
+        filtered_customers = [
+            customer for customer in all_customers
+            if client_search in str(customer).upper()
+        ] if client_search else all_customers
+        
+        # Multi-select for clients to exclude
+        excluded_clients = st.sidebar.multiselect(
+            "Select Clients to Exclude",
+            options=filtered_customers,
+            default=existing_staff,
+            help="These clients will be excluded from the analysis"
+        )
+        
+        # Clean data and filter by date range and excluded clients
+        df_clean = clean_data(df, excluded_clients)
         df_clean = df_clean[
             (df_clean['Date'].dt.date >= start_date) &
             (df_clean['Date'].dt.date <= end_date)
