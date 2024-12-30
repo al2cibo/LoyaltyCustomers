@@ -907,9 +907,9 @@ def main():
             
             client_analysis = analyze_clients(df_clean, customer_segments)
             
+            # Top Spenders Section
             st.subheader("🌟 Top Spenders")
             st.dataframe(client_analysis['top_spenders'].set_index('Customer'), use_container_width=True)
-            
             st.markdown("""
             <div class='insight-box'>
                 <h4>💡 Top Spenders Insights</h4>
@@ -929,9 +929,9 @@ def main():
                 client_analysis['top_spenders']['loyalty_days'].mean()
             ), unsafe_allow_html=True)
             
+            # Most Frequent Customers Section
             st.subheader("🔄 Most Frequent Customers")
             st.dataframe(client_analysis['most_frequent'].set_index('Customer'), use_container_width=True)
-            
             st.markdown("""
             <div class='insight-box'>
                 <h4>💡 Frequency Insights</h4>
@@ -949,94 +949,86 @@ def main():
                 len(client_analysis['most_frequent'][client_analysis['most_frequent']['visits_per_month'] > 4])
             ), unsafe_allow_html=True)
             
-            col1, col2 = st.columns(2)
+            # Lost Valuable Customers Section
+            st.subheader("⚠️ Lost Valuable Customers")
+            st.dataframe(client_analysis['lost_valuable'].set_index('Customer'), use_container_width=True)
+            st.markdown("""
+            <div class='recommendation-box'>
+                <h4>🎯 Recovery Opportunities</h4>
+                <ul>
+                    <li>Potential monthly revenue at risk: ${:.2f}</li>
+                    <li>Average customer value: ${:.2f}</li>
+                    <li>Typical visit frequency: {:.1f} days</li>
+                    <li>Last visit range: {} to {} days ago</li>
+                </ul>
+            </div>
+            """.format(
+                client_analysis['lost_valuable']['potential_monthly_revenue_loss'].sum(),
+                client_analysis['lost_valuable']['avg_spend'].mean(),
+                client_analysis['lost_valuable']['visit_count'].mean(),
+                client_analysis['lost_valuable']['days_since_last_visit'].min(),
+                client_analysis['lost_valuable']['days_since_last_visit'].max()
+            ), unsafe_allow_html=True)
             
-            with col1:
-                st.subheader("⚠️ Lost Valuable Customers")
-                st.dataframe(client_analysis['lost_valuable'].set_index('Customer'), use_container_width=True)
-                
-                st.markdown("""
-                <div class='recommendation-box'>
-                    <h4>🎯 Recovery Opportunities</h4>
-                    <ul>
-                        <li>Potential monthly revenue at risk: ${:.2f}</li>
-                        <li>Average customer value: ${:.2f}</li>
-                        <li>Typical visit frequency: {:.1f} days</li>
-                        <li>Last visit range: {} to {} days ago</li>
-                    </ul>
-                </div>
-                """.format(
-                    client_analysis['lost_valuable']['potential_monthly_revenue_loss'].sum(),
-                    client_analysis['lost_valuable']['avg_spend'].mean(),
-                    client_analysis['lost_valuable']['visit_count'].mean(),
-                    client_analysis['lost_valuable']['days_since_last_visit'].min(),
-                    client_analysis['lost_valuable']['days_since_last_visit'].max()
-                ), unsafe_allow_html=True)
+            # At-Risk Customers Section
+            st.subheader("⚡ At-Risk Customers")
+            st.dataframe(client_analysis['at_risk'].set_index('Customer'), use_container_width=True)
+            st.markdown("""
+            <div class='recommendation-box'>
+                <h4>🎯 Retention Opportunities</h4>
+                <ul>
+                    <li>Total revenue at risk: ${:.2f}</li>
+                    <li>Average days since last visit: {:.1f}</li>
+                    <li>Typical customer value: ${:.2f}</li>
+                    <li>Number of customers to target: {}</li>
+                </ul>
+            </div>
+            """.format(
+                client_analysis['at_risk']['total_spend'].sum(),
+                client_analysis['at_risk']['days_since_last_visit'].mean(),
+                client_analysis['at_risk']['avg_spend'].mean(),
+                len(client_analysis['at_risk'])
+            ), unsafe_allow_html=True)
             
-            with col2:
-                st.subheader("⚡ At-Risk Customers")
-                st.dataframe(client_analysis['at_risk'].set_index('Customer'), use_container_width=True)
-                
-                st.markdown("""
-                <div class='recommendation-box'>
-                    <h4>🎯 Retention Opportunities</h4>
-                    <ul>
-                        <li>Total revenue at risk: ${:.2f}</li>
-                        <li>Average days since last visit: {:.1f}</li>
-                        <li>Typical customer value: ${:.2f}</li>
-                        <li>Number of customers to target: {}</li>
-                    </ul>
-                </div>
-                """.format(
-                    client_analysis['at_risk']['total_spend'].sum(),
-                    client_analysis['at_risk']['days_since_last_visit'].mean(),
-                    client_analysis['at_risk']['avg_spend'].mean(),
-                    len(client_analysis['at_risk'])
-                ), unsafe_allow_html=True)
+            # Recent New Customers Section
+            st.subheader("🆕 Recent New Customers")
+            st.dataframe(client_analysis['recent_new'].set_index('Customer'), use_container_width=True)
+            st.markdown("""
+            <div class='insight-box'>
+                <h4>💡 New Customer Insights</h4>
+                <ul>
+                    <li>Average first month spend: ${:.2f}</li>
+                    <li>Visit frequency: {:.1f} times per week</li>
+                    <li>High-value potential customers: {}</li>
+                    <li>Total new customer revenue: ${:.2f}</li>
+                </ul>
+            </div>
+            """.format(
+                client_analysis['recent_new']['total_spend'].mean(),
+                client_analysis['recent_new']['visits_per_week'].mean(),
+                len(client_analysis['recent_new'][client_analysis['recent_new']['total_spend'] > client_analysis['recent_new']['total_spend'].quantile(0.75)]),
+                client_analysis['recent_new']['total_spend'].sum()
+            ), unsafe_allow_html=True)
             
-            col3, col4 = st.columns(2)
-            
-            with col3:
-                st.subheader("🆕 Recent New Customers")
-                st.dataframe(client_analysis['recent_new'].set_index('Customer'), use_container_width=True)
-                
-                st.markdown("""
-                <div class='insight-box'>
-                    <h4>💡 New Customer Insights</h4>
-                    <ul>
-                        <li>Average first month spend: ${:.2f}</li>
-                        <li>Visit frequency: {:.1f} times per week</li>
-                        <li>High-value potential customers: {}</li>
-                        <li>Total new customer revenue: ${:.2f}</li>
-                    </ul>
-                </div>
-                """.format(
-                    client_analysis['recent_new']['total_spend'].mean(),
-                    client_analysis['recent_new']['visits_per_week'].mean(),
-                    len(client_analysis['recent_new'][client_analysis['recent_new']['total_spend'] > client_analysis['recent_new']['total_spend'].quantile(0.75)]),
-                    client_analysis['recent_new']['total_spend'].sum()
-                ), unsafe_allow_html=True)
-            
-            with col4:
-                st.subheader("📈 Best Improving Customers")
-                st.dataframe(client_analysis['best_improvers'].set_index('Customer'), use_container_width=True)
-                
-                st.markdown("""
-                <div class='insight-box'>
-                    <h4>💡 Growth Insights</h4>
-                    <ul>
-                        <li>Average spend increase: {:.1f}%</li>
-                        <li>Total revenue from improvers: ${:.2f}</li>
-                        <li>Average visit frequency: {:.1f} days</li>
-                        <li>Recent activity: {} active in last 30 days</li>
-                    </ul>
-                </div>
-                """.format(
-                    client_analysis['improvement_stats']['avg_improvement'],
-                    client_analysis['improvement_stats']['total_revenue'],
-                    client_analysis['improvement_stats']['avg_visits'],
-                    client_analysis['improvement_stats']['active_last_30']
-                ), unsafe_allow_html=True)
+            # Best Improving Customers Section
+            st.subheader("📈 Best Improving Customers")
+            st.dataframe(client_analysis['best_improvers'].set_index('Customer'), use_container_width=True)
+            st.markdown("""
+            <div class='insight-box'>
+                <h4>💡 Growth Insights</h4>
+                <ul>
+                    <li>Average spend increase: {:.1f}%</li>
+                    <li>Total revenue from improvers: ${:.2f}</li>
+                    <li>Average visit frequency: {:.1f} days</li>
+                    <li>Recent activity: {} active in last 30 days</li>
+                </ul>
+            </div>
+            """.format(
+                client_analysis['improvement_stats']['avg_improvement'],
+                client_analysis['improvement_stats']['total_revenue'],
+                client_analysis['improvement_stats']['avg_visits'],
+                client_analysis['improvement_stats']['active_last_30']
+            ), unsafe_allow_html=True)
         
         with tab6:
             st.header("Summary & Export")
