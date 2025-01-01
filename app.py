@@ -88,6 +88,16 @@ def clean_data(df, additional_excluded_clients=None):
     # Clean amount column
     df['Total'] = df['Total'].str.replace('$', '').str.replace(',', '').astype(float)
     
+    # Normalize customer names
+    df['Customer'] = df['Customer'].astype(str).apply(lambda x: 
+        ' '.join(  # Join with single space
+            x.strip()  # Remove leading/trailing spaces
+            .replace('  ', ' ')  # Remove double spaces
+            .title()  # Capitalize first letter of each word
+            .split()  # Split into words
+        )
+    )
+    
     # Filter for completed transactions only
     df = df[df['Completed'] == 'Yes']
     
@@ -95,6 +105,7 @@ def clean_data(df, additional_excluded_clients=None):
     df = df[
         df['Customer'].notna() & 
         (df['Customer'] != '') & 
+        (df['Customer'] != 'Nan') &  # Exclude 'nan' values
         ~df['Customer'].str.upper().isin([name.upper() for name in excluded_clients])
     ]
     
@@ -693,7 +704,7 @@ def main():
         retention_data = calculate_revenue_retention(df_clean)
         
         # Create tabs for different analyses
-        tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+        tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9 = st.tabs([
             "📈 Overview",
             "🔄 Customer Retention",
             "👥 Customer Segments",
@@ -701,6 +712,7 @@ def main():
             "👤 Client Analysis",
             "💎 Lifetime Value",
             "🔍 One-Time Buyers",
+            "⏱️ Visit Frequency",
             "📊 Summary & Export"
         ])
         
@@ -1721,6 +1733,224 @@ def main():
                 """, unsafe_allow_html=True)
         
         with tab8:
+            st.header("Visit Frequency Analysis")
+            st.markdown("""
+            This section analyzes how frequently different customer segments visit your business. Understanding visit patterns
+            helps identify loyal customers and opportunities to increase visit frequency.
+            """)
+            
+            # Calculate visit frequency metrics for all customers
+            visit_metrics = df_clean.groupby('Customer').agg({
+                'Date': ['count', 'min', 'max'],
+                'Total': 'sum'
+            }).reset_index()
+            visit_metrics.columns = ['Customer', 'Visit Count', 'First Visit', 'Last Visit', 'Total Spend']
+            
+            # Calculate days between visits for returning customers
+            visit_metrics['Customer Lifetime Days'] = (visit_metrics['Last Visit'] - visit_metrics['First Visit']).dt.days
+            visit_metrics.loc[visit_metrics['Customer Lifetime Days'] == 0, 'Customer Lifetime Days'] = 1  # Avoid division by zero
+            
+            # Calculate average days between visits (only for returning customers)
+            returning_customers = visit_metrics[visit_metrics['Visit Count'] > 1].copy()
+            returning_customers['Avg Days Between Visits'] = returning_customers['Customer Lifetime Days'] / (returning_customers['Visit Count'] - 1)
+            
+            # Identify top spenders (top 20%)
+            spend_threshold = visit_metrics['Total Spend'].quantile(0.8)
+            top_spenders = returning_customers[returning_customers['Total Spend'] >= spend_threshold].copy()
+            
+            # Display overall metrics
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                one_time_count = len(visit_metrics[visit_metrics['Visit Count'] == 1])
+                st.metric(
+                    "One-Time Customers",
+                    f"{one_time_count:,}",
+                    f"{(one_time_count/len(visit_metrics)*100):.1f}% of total"
+                )
+            
+            with col2:
+                st.metric(
+                    "Returning Customers Avg Days Between Visits",
+                    f"{returning_customers['Avg Days Between Visits'].mean():.1f}",
+                    f"Median: {returning_customers['Avg Days Between Visits'].median():.1f}"
+                )
+            
+            with col3:
+                st.metric(
+                    "Top Spenders Avg Days Between Visits",
+                    f"{top_spenders['Avg Days Between Visits'].mean():.1f}",
+                    f"Median: {top_spenders['Avg Days Between Visits'].median():.1f}"
+                )
+            
+            # Create visit frequency distribution chart
+            st.subheader("📊 Visit Frequency Distribution")
+            
+            fig = make_subplots(rows=1, cols=2, subplot_titles=(
+                "All Returning Customers",
+                "Top Spenders Only"
+            ))
+            
+            # Histogram for all returning customers
+            fig.add_trace(
+                go.Histogram(
+                    x=returning_customers['Avg Days Between Visits'],
+                    name="All Returning",
+                    nbinsx=30,
+                    marker_color='#1f77b4'
+                ),
+                row=1, col=1
+            )
+            
+            # Histogram for top spenders
+            fig.add_trace(
+                go.Histogram(
+                    x=top_spenders['Avg Days Between Visits'],
+                    name="Top Spenders",
+                    nbinsx=30,
+                    marker_color='#2ecc71'
+                ),
+                row=1, col=2
+            )
+            
+            fig.update_layout(
+                height=400,
+                showlegend=False,
+                title_text="Distribution of Days Between Visits"
+            )
+            
+            fig.update_xaxes(title_text="Days Between Visits")
+            fig.update_yaxes(title_text="Number of Customers")
+            
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Detailed breakdown table
+            st.subheader("📋 Detailed Visit Frequency Breakdown")
+            
+            # Create frequency segments
+            def categorize_frequency(days):
+                if days <= 7:
+                    return 'Weekly or More'
+                elif days <= 14:
+                    return 'Bi-Weekly'
+                elif days <= 30:
+                    return 'Monthly'
+                elif days <= 60:
+                    return 'Bi-Monthly'
+                else:
+                    return 'Less Frequent'
+            
+            returning_customers['Frequency Category'] = returning_customers['Avg Days Between Visits'].apply(categorize_frequency)
+            top_spenders['Frequency Category'] = top_spenders['Avg Days Between Visits'].apply(categorize_frequency)
+            
+            # Create comparison table
+            freq_comparison = pd.DataFrame({
+                'All Returning Customers': returning_customers['Frequency Category'].value_counts(),
+                'Top Spenders': top_spenders['Frequency Category'].value_counts()
+            }).fillna(0)
+            
+            # Calculate percentages
+            freq_comparison['All Returning %'] = (freq_comparison['All Returning Customers'] / len(returning_customers) * 100).round(1)
+            freq_comparison['Top Spenders %'] = (freq_comparison['Top Spenders'] / len(top_spenders) * 100).round(1)
+            
+            # Sort by frequency category
+            freq_order = ['Weekly or More', 'Bi-Weekly', 'Monthly', 'Bi-Monthly', 'Less Frequent']
+            freq_comparison = freq_comparison.reindex(freq_order)
+            
+            st.dataframe(freq_comparison, use_container_width=True)
+            
+            # Insights and recommendations
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.markdown("""
+                <div class='insight-box'>
+                    <h4>📊 Key Insights</h4>
+                    <ul>
+                        <li><strong>Visit Patterns:</strong>
+                            <ul>
+                                <li>Top spenders visit every {:.1f} days</li>
+                                <li>Regular customers visit every {:.1f} days</li>
+                                <li>{:.1f}% difference in visit frequency</li>
+                            </ul>
+                        </li>
+                        <li><strong>Customer Mix:</strong>
+                            <ul>
+                                <li>{:.1f}% visit at least monthly</li>
+                                <li>{:.1f}% of top spenders visit weekly</li>
+                                <li>{} total frequent visitors</li>
+                            </ul>
+                        </li>
+                    </ul>
+                </div>
+                """.format(
+                    top_spenders['Avg Days Between Visits'].mean(),
+                    returning_customers['Avg Days Between Visits'].mean(),
+                    ((returning_customers['Avg Days Between Visits'].mean() - top_spenders['Avg Days Between Visits'].mean()) / 
+                     returning_customers['Avg Days Between Visits'].mean() * 100),
+                    len(returning_customers[returning_customers['Avg Days Between Visits'] <= 30]) / len(returning_customers) * 100,
+                    len(top_spenders[top_spenders['Avg Days Between Visits'] <= 7]) / len(top_spenders) * 100,
+                    len(returning_customers[returning_customers['Avg Days Between Visits'] <= 14])
+                ), unsafe_allow_html=True)
+            
+            with col2:
+                st.markdown("""
+                <div class='recommendation-box'>
+                    <h4>💡 Recommendations</h4>
+                    <ul>
+                        <li><strong>Frequency Optimization:</strong>
+                            <ul>
+                                <li>Target bi-weekly customers to increase to weekly</li>
+                                <li>Create special offers for consistent visitors</li>
+                                <li>Implement visit streak rewards</li>
+                            </ul>
+                        </li>
+                        <li><strong>Engagement Strategies:</strong>
+                            <ul>
+                                <li>Send reminders based on typical visit patterns</li>
+                                <li>Develop programs to match top spender frequency</li>
+                                <li>Create urgency for less frequent visitors</li>
+                            </ul>
+                        </li>
+                    </ul>
+                </div>
+                """, unsafe_allow_html=True)
+            
+            # Additional analysis options
+            st.subheader("🔍 Detailed Customer View")
+            
+            # Add frequency filter
+            frequency_filter = st.selectbox(
+                "Filter by Visit Frequency",
+                ['All'] + freq_order
+            )
+            
+            # Add spending filter
+            spend_filter = st.selectbox(
+                "Filter by Spending Level",
+                ['All', 'Top Spenders', 'Regular Spenders']
+            )
+            
+            # Filter the data
+            filtered_data = returning_customers.copy()
+            
+            if frequency_filter != 'All':
+                filtered_data = filtered_data[filtered_data['Frequency Category'] == frequency_filter]
+            
+            if spend_filter == 'Top Spenders':
+                filtered_data = filtered_data[filtered_data['Total Spend'] >= spend_threshold]
+            elif spend_filter == 'Regular Spenders':
+                filtered_data = filtered_data[filtered_data['Total Spend'] < spend_threshold]
+            
+            # Display filtered customer list
+            st.dataframe(
+                filtered_data[['Customer', 'Visit Count', 'Avg Days Between Visits', 'Total Spend', 'Frequency Category']]
+                .sort_values('Avg Days Between Visits')
+                .reset_index(drop=True),
+                use_container_width=True
+            )
+        
+        with tab9:
             st.header("Summary & Export")
             st.markdown("Analysis Period: {} to {}".format(
                 start_date.strftime('%Y-%m-%d'),
